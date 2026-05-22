@@ -1,0 +1,110 @@
+# =============================================================
+# AI APK Factory - Auto Upload Workflow
+# প্রতি 12 ঘণ্টায় video generate + upload করে
+# YouTube + Facebook auto-upload
+# Self-improving prompts based on analytics
+# =============================================================
+
+name: Auto Upload Videos
+
+on:
+  schedule:
+    # Every 12 hours: 9 AM and 9 PM UTC
+    - cron: '0 9,21 * * *'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [auto-upload]
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  generate-and-upload:
+    name: Generate & Upload Video
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests aiohttp python-dotenv rich pyyaml schedule pillow edge-tts
+
+      - name: Create .env from secrets
+        run: |
+          cat > .env << EOF
+          OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          HF_API_KEY=${{ secrets.HF_API_KEY }}
+          GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+          GITHUB_OWNER=${{ secrets.GITHUB_OWNER }}
+          GITHUB_REPO=${{ secrets.GITHUB_REPO }}
+          YT_CLIENT_ID=${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET=${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN=${{ secrets.YT_REFRESH_TOKEN }}
+          YT_CHANNEL_ID=${{ secrets.YT_CHANNEL_ID }}
+          FB_PAGE_ID=${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN=${{ secrets.FB_PAGE_TOKEN }}
+          TTS_VOICE=hi-IN-MadhurNeural
+          CONTENT_THEME=anime_explanation
+          EOF
+
+      - name: Create directories
+        run: |
+          mkdir -p cache logs release
+
+      - name: Run automation pipeline
+        id: pipeline
+        run: |
+          python scheduler.py 2>&1 | tee logs/scheduler.log
+          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Upload logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: automation-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 30
+
+      - name: Upload cache as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: automation-cache-${{ github.run_number }}
+          path: cache/
+          retention-days: 7
+
+      - name: Commit improved prompts
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add cache/*.txt cache/*.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "chore: update prompts and cache [skip ci]"
+          git push || true
+
+      - name: Report status
+        if: always()
+        run: |
+          echo "Pipeline exit code: ${{ steps.pipeline.outputs.exit_code }}"
+          if [ "${{ steps.pipeline.outputs.exit_code }}" = "0" ]; then
+            echo "✅ Pipeline completed successfully"
+          else
+            echo "❌ Pipeline failed - check logs artifact"
+          fi
